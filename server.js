@@ -84,8 +84,7 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 200,
-            responseMimeType: "application/json"
+            maxOutputTokens: 8192
           }
           }
         })
