@@ -73,7 +73,7 @@ Sadece ve sadece aşağıdaki JSON formatında yanıt ver, başka hiçbir şey y
 {"name":"yemek adı","description":"kısa açıklama","portion":"porsiyon bilgisi","calories":450,"protein":28,"carbs":45,"fat":15,"fiber":5,"sugar":8,"sodium":680,"potassium":420,"calcium":85,"iron":3.2,"vitamin_c":12,"vitamin_a":150,"source":"kaynak adı"}`;
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, 
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
