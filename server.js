@@ -67,10 +67,10 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     const mediaType = req.file.mimetype;
     const apiKey = process.env.GEMINI_API_KEY;
 
-    const prompt = `Bu yemek fotoğrafını analiz et. Yemeği tanı ve besin değerlerini hesapla. Hangi kaynağı baz aldığını belirt (USDA, Türk Gıda Kodeksi vb).
+    const prompt = `Analyze this food photo. Identify the food and calculate its nutritional values. Specify which source you used (USDA, etc).
 
-Sadece ve sadece aşağıdaki JSON formatında yanıt ver, başka hiçbir şey yazma, markdown kullanma:
-{"name":"yemek adı","description":"kısa açıklama","portion":"porsiyon bilgisi","calories":450,"protein":28,"carbs":45,"fat":15,"fiber":5,"sugar":8,"sodium":680,"potassium":420,"calcium":85,"iron":3.2,"vitamin_c":12,"vitamin_a":150,"source":"kaynak adı"}`;
+Reply ONLY with this exact JSON format, no other text, no markdown:
+{"name":"food name in Turkish","description":"short description in Turkish","portion":"portion info","calories":450,"protein":28,"carbs":45,"fat":15,"fiber":5,"sugar":8,"sodium":680,"potassium":420,"calcium":85,"iron":3.2,"vitamin_c":12,"vitamin_a":150,"source":"source name"}`;
 
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, 
