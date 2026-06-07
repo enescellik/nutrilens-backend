@@ -67,11 +67,9 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     const mediaType = req.file.mimetype;
     const apiKey = process.env.GEMINI_API_KEY;
 
-    const prompt = `Analyze this food photo. Identify the food and calculate its nutritional values. Specify which source you used (USDA, etc).
-
-Reply ONLY with this exact JSON format, no other text, no markdown:
-{"name":"food name in Turkish","description":"short description in Turkish","portion":"portion info","calories":450,"protein":28,"carbs":45,"fat":15,"fiber":5,"sugar":8,"sodium":680,"potassium":420,"calcium":85,"iron":3.2,"vitamin_c":12,"vitamin_a":150,"source":"source name"}`;
-
+    const prompt = `Analyze this food image. Reply ONLY with this JSON, no other text:
+{"name":"Turkish name","description":"brief","portion":"amount","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sugar":0,"sodium":0,"potassium":0,"calcium":0,"iron":0,"vitamin_c":0,"vitamin_a":0,"source":"source"}`;
+    
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, 
       {
@@ -86,7 +84,7 @@ Reply ONLY with this exact JSON format, no other text, no markdown:
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 1000
+            maxOutputTokens: 500
           }
         })
       }
