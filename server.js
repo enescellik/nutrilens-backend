@@ -7,7 +7,7 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 const db = new Database('nutrilens.db');
 db.exec(`
@@ -67,31 +67,10 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     const mediaType = req.file.mimetype;
     const apiKey = process.env.GEMINI_API_KEY;
 
-    const prompt = `Bu yemek fotoğrafını analiz et.
+    const prompt = `Bu yemek fotoğrafını analiz et. Yemeği tanı ve besin değerlerini hesapla. Hangi kaynağı baz aldığını belirt (USDA, Türk Gıda Kodeksi vb).
 
-ADIM 1: Fotoğraftaki yemeği tanımla.
-ADIM 2: Bu yemeğin besin değerlerini bilinen güvenilir kaynaklara göre hesapla (USDA, Türk Gıda Kodeksi, ürün bilgileri).
-ADIM 3: Hangi kaynağı baz aldığını belirt.
-
-Sonucu SADECE şu JSON formatında döndür, başka hiçbir şey yazma:
-{
-  "name": "Yemeğin Türkçe adı",
-  "description": "Kısa açıklama",
-  "portion": "Porsiyon bilgisi (örn: 1 tabak ~350g)",
-  "calories": 450,
-  "protein": 28,
-  "carbs": 45,
-  "fat": 15,
-  "fiber": 5,
-  "sugar": 8,
-  "sodium": 680,
-  "potassium": 420,
-  "calcium": 85,
-  "iron": 3.2,
-  "vitamin_c": 12,
-  "vitamin_a": 150,
-  "source": "Kaynak adı"
-}`;
+Sadece ve sadece aşağıdaki JSON formatında yanıt ver, başka hiçbir şey yazma, markdown kullanma:
+{"name":"yemek adı","description":"kısa açıklama","portion":"porsiyon bilgisi","calories":450,"protein":28,"carbs":45,"fat":15,"fiber":5,"sugar":8,"sodium":680,"potassium":420,"calcium":85,"iron":3.2,"vitamin_c":12,"vitamin_a":150,"source":"kaynak adı"}`;
 
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
@@ -101,21 +80,34 @@ Sonucu SADECE şu JSON formatında döndür, başka hiçbir şey yazma:
         body: JSON.stringify({
           contents: [{
             parts: [
-              { text: prompt },
-              { inline_data: { mime_type: mediaType, data: imageBase64 } }
+              { inline_data: { mime_type: mediaType, data: imageBase64 } },
+              { text: prompt }
             ]
-          }]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 1000
+          }
         })
       }
     );
 
     const data = await response.json();
+    console.log('Gemini yanıtı:', JSON.stringify(data).substring(0, 500));
+
+    if (!data.candidates || data.candidates.length === 0) {
+      throw new Error('Gemini yanıt vermedi: ' + JSON.stringify(data));
+    }
+
     const text = data.candidates[0].content.parts[0].text;
-    const clean = text.replace(/```json|```/g, '').trim();
+    console.log('Ham metin:', text);
+
+    const clean = text.replace(/```json/g, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(clean);
     res.json(parsed);
+
   } catch (err) {
-    console.error(err);
+    console.error('Analiz hatası:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
