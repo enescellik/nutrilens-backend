@@ -69,54 +69,155 @@ app.delete('/meals/:id', (req, res) => {
   });
 });
 
+async function analyzeWithGemini(imageBase64, mediaType) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const prompt = `Analyze this food image. Reply ONLY with this JSON, no markdown, no extra text:
+{"name":"Turkish food name","description":"brief desc","portion":"amount","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sugar":0,"sodium":0,"potassium":0,"calcium":0,"iron":0,"vitamin_c":0,"vitamin_a":0,"source":"source"}`;
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { inline_data: { mime_type: mediaType, data: imageBase64 } },
+            { text: prompt }
+          ]
+        }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+      })
+    }
+  );
+
+  const data = await response.json();
+  if (!data.candidates || data.candidates.length === 0) {
+    throw new Error('Gemini yanıt vermedi: ' + JSON.stringify(data));
+  }
+  const text = data.candidates[0].content.parts[0].text;
+  const clean = text.replace(/```json/g, '').replace(/```/g, '').trim();
+  return JSON.parse(clean);
+}
+
 app.post('/analyze', upload.single('image'), async (req, res) => {
   try {
     const imageBase64 = req.file.buffer.toString('base64');
     const mediaType = req.file.mimetype;
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    const prompt = `Analyze this food image. Reply ONLY with this JSON, no markdown, no extra text:
-{"name":"Turkish food name","description":"brief desc","portion":"amount","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sugar":0,"sodium":0,"potassium":0,"calcium":0,"iron":0,"vitamin_c":0,"vitamin_a":0,"source":"source"}`;
-
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { inline_data: { mime_type: mediaType, data: imageBase64 } },
-              { text: prompt }
-            ]
-          }],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 8192
-          }
-        })
-      }
-    );
-
-    const data = await response.json();
-    console.log('Gemini yanıtı:', JSON.stringify(data).substring(0, 300));
-
-    if (!data.candidates || data.candidates.length === 0) {
-      throw new Error('Gemini yanıt vermedi: ' + JSON.stringify(data));
-    }
-
-    const text = data.candidates[0].content.parts[0].text;
-    console.log('Ham metin:', text.substring(0, 200));
-
-    const clean = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(clean);
-    res.json(parsed);
-
+    const result = await analyzeWithGemini(imageBase64, mediaType);
+    res.json(result);
   } catch (err) {
     console.error('Analiz hatası:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
+// Telegram bot
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const BACKEND_URL = process.env.RAILWAY_PUBLIC_DOMAIN 
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : 'http://localhost:3000';
+
+async function telegramRequest(method, body) {
+  const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/${method}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  return r.json();
+}
+
+async function sendMessage(chatId, text) {
+  return telegramRequest('sendMessage', { chat_id: chatId, text });
+}
+
+app.post('/telegram', async (req, res) => {
+  res.json({ ok: true });
+  const update = req.body;
+  if (!update.message) return;
+
+  const chatId = update.message.chat.id;
+  const text = update.message.text;
+  const photo = update.message.photo;
+
+  if (text === '/start') {
+    await sendMessage(chatId, '🥗 NutriLens\'e hoş geldin! Yemek fotoğrafı gönder, besin değerlerini analiz edeyim ve kayıt altına alayım.');
+    return;
+  }
+
+  if (text === '/bugun') {
+    const date = new Date().toISOString().split('T')[0];
+    db.all('SELECT * FROM meals WHERE date = ?', [date], async (err, rows) => {
+      if (err || !rows.length) {
+        await sendMessage(chatId, 'Bugün henüz öğün kaydedilmedi.');
+        return;
+      }
+      const totals = rows.reduce((a, m) => ({
+        kcal: a.kcal + (m.calories || 0),
+        protein: a.protein + (m.protein || 0),
+        carbs: a.carbs + (m.carbs || 0),
+        fat: a.fat + (m.fat || 0)
+      }), { kcal: 0, protein: 0, carbs: 0, fat: 0 });
+
+      let msg = `📊 Bugünkü özet (${rows.length} öğün):\n\n`;
+      rows.forEach(m => { msg += `• ${m.name} — ${Math.round(m.calories || 0)} kcal\n`; });
+      msg += `\n🔥 Toplam: ${Math.round(totals.kcal)} kcal`;
+      msg += `\n💪 Protein: ${Math.round(totals.protein)}g`;
+      msg += `\n🍞 Karb: ${Math.round(totals.carbs)}g`;
+      msg += `\n🧈 Yağ: ${Math.round(totals.fat)}g`;
+      await sendMessage(chatId, msg);
+    });
+    return;
+  }
+
+  if (photo) {
+    await sendMessage(chatId, '📸 Fotoğraf alındı, analiz ediliyor...');
+    try {
+      const fileId = photo[photo.length - 1].file_id;
+      const fileInfo = await telegramRequest('getFile', { file_id: fileId });
+      const filePath = fileInfo.result.file_path;
+      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+
+      const imgResponse = await fetch(fileUrl);
+      const arrayBuffer = await imgResponse.arrayBuffer();
+      const imageBase64 = Buffer.from(arrayBuffer).toString('base64');
+
+      const result = await analyzeWithGemini(imageBase64, 'image/jpeg');
+
+      const date = new Date().toISOString().split('T')[0];
+      db.run(
+        `INSERT INTO meals (date, name, description, portion, calories, protein, carbs, fat, fiber, sugar, sodium, potassium, calcium, iron, vitamin_c, vitamin_a, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [date, result.name, result.description, result.portion, result.calories, result.protein, result.carbs, result.fat, result.fiber, result.sugar, result.sodium, result.potassium, result.calcium, result.iron, result.vitamin_c, result.vitamin_a, result.source]
+      );
+
+      let msg = `✅ ${result.name} kaydedildi!\n\n`;
+      msg += `🔥 ${Math.round(result.calories || 0)} kcal\n`;
+      msg += `💪 Protein: ${Math.round(result.protein || 0)}g\n`;
+      msg += `🍞 Karb: ${Math.round(result.carbs || 0)}g\n`;
+      msg += `🧈 Yağ: ${Math.round(result.fat || 0)}g\n`;
+      msg += `📌 Kaynak: ${result.source || '-'}`;
+      await sendMessage(chatId, msg);
+    } catch (err) {
+      await sendMessage(chatId, '❌ Analiz başarısız: ' + err.message);
+    }
+    return;
+  }
+
+  await sendMessage(chatId, 'Yemek fotoğrafı gönder veya /bugun yaz.');
+});
+
+async function setWebhook() {
+  if (!TELEGRAM_TOKEN) return;
+  const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
+  if (!domain) return;
+  const webhookUrl = `https://${domain}/telegram`;
+  const result = await telegramRequest('setWebhook', { url: webhookUrl });
+  console.log('Webhook kuruldu:', result);
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`NutriLens backend çalışıyor: port ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`NutriLens backend çalışıyor: port ${PORT}`);
+  await setWebhook();
+});
