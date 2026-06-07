@@ -1,12 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const Anthropic = require('@anthropic-ai/sdk');
 const Database = require('better-sqlite3');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 app.use(cors());
 app.use(express.json());
@@ -67,20 +65,13 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
   try {
     const imageBase64 = req.file.buffer.toString('base64');
     const mediaType = req.file.mimetype;
+    const apiKey = process.env.GEMINI_API_KEY;
 
-    const response = await client.messages.create({
-      model: 'claude-opus-4-5',
-      max_tokens: 2000,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: mediaType, data: imageBase64 } },
-          { type: 'text', text: `Bu yemek fotoğrafını analiz et. 
+    const prompt = `Bu yemek fotoğrafını analiz et.
 
 ADIM 1: Fotoğraftaki yemeği tanımla.
-ADIM 2: Web'de ara - önce resmi kaynaklar: USDA FoodData Central, Türk Gıda Kodeksi, ürün markası sitesi. Bulamazsan Cronometer, Nutritionix gibi veritabanlarına bak. Birden fazla kaynak bul ve karşılaştır.
-ADIM 3: En güvenilir kaynağı seç ve bunu belirt.
+ADIM 2: Bu yemeğin besin değerlerini bilinen güvenilir kaynaklara göre hesapla (USDA, Türk Gıda Kodeksi, ürün bilgileri).
+ADIM 3: Hangi kaynağı baz aldığını belirt.
 
 Sonucu SADECE şu JSON formatında döndür, başka hiçbir şey yazma:
 {
@@ -99,18 +90,30 @@ Sonucu SADECE şu JSON formatında döndür, başka hiçbir şey yazma:
   "iron": 3.2,
   "vitamin_c": 12,
   "vitamin_a": 150,
-  "source": "Kaynak: USDA FoodData Central"
-}` }
-        ]
-      }]
-    });
+  "source": "Kaynak adı"
+}`;
 
-    const textBlock = response.content.find(b => b.type === 'text');
-    if (!textBlock) throw new Error('Yanıt alınamadı');
-    
-    const clean = textBlock.text.replace(/```json|```/g, '').trim();
-    const data = JSON.parse(clean);
-    res.json(data);
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: prompt },
+              { inline_data: { mime_type: mediaType, data: imageBase64 } }
+            ]
+          }]
+        })
+      }
+    );
+
+    const data = await response.json();
+    const text = data.candidates[0].content.parts[0].text;
+    const clean = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    res.json(parsed);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
