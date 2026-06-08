@@ -297,7 +297,49 @@ app.post('/telegram', async (req, res) => {
     return;
   }
 
-  await sendMessage(chatId, 'Yemek fotoğrafı gönder veya /bugun yaz.');
+  // Metin ile yemek girişi
+  if (text && !text.startsWith('/')) {
+    await sendMessage(chatId, '⏳ Analiz ediliyor...');
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      const prompt = `Kullanıcı şunu yedi: "${text}"
+Bu yiyeceğin besin değerlerini hesapla. Reply ONLY with this JSON, no markdown:
+{"name":"yemek adı","description":"kısa açıklama","portion":"${text}","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sugar":0,"sodium":0,"potassium":0,"calcium":0,"iron":0,"vitamin_c":0,"vitamin_a":0,"source":"kaynak"}`;
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+          })
+        }
+      );
+
+      const data = await response.json();
+      if (!data.candidates || !data.candidates[0]) throw new Error('Yanıt alınamadı');
+      const responseText = data.candidates[0].content.parts[0].text;
+      const clean = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
+      const result = JSON.parse(clean);
+
+      saveMealToDB(result);
+
+      let msg = `✅ ${result.name} kaydedildi!\n\n`;
+      msg += `🔥 ${Math.round(result.calories || 0)} kcal\n`;
+      msg += `💪 Protein: ${Math.round(result.protein || 0)}g\n`;
+      msg += `🍞 Karb: ${Math.round(result.carbs || 0)}g\n`;
+      msg += `🧈 Yağ: ${Math.round(result.fat || 0)}g\n`;
+      msg += `📌 Kaynak: ${result.source || '-'}`;
+      await sendMessage(chatId, msg);
+    } catch (err) {
+      await sendMessage(chatId, '❌ Hesaplanamadı: ' + err.message);
+    }
+    return;
+  }
+
+  await sendMessage(chatId, 'Yemek fotoğrafı gönder veya metin yaz (örn: "2 adet elma") ya da /bugun yaz.');
 });
 
 async function setWebhook() {
