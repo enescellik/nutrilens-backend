@@ -212,6 +212,23 @@ app.post('/telegram', async (req, res) => {
 
   // Porsiyon cevabı bekleniyor
   if (state && state.step === 'waiting_portion' && text) {
+    // Gram seçeneği seçildi
+    const gramMatch = text.match(/(\d+)g/);
+    if (gramMatch) {
+      const gram = parseInt(gramMatch[1]);
+      await sendMessage(chatId, '⏳ Hesaplanıyor...');
+      try {
+        const portionText = `${gram}g`;
+        const result = await recalculateWithPortion(state.foodData, portionText);
+        userStates[chatId] = null;
+        saveMealToDB(result);
+        await sendMessage(chatId, mealSummary(result));
+      } catch(err) {
+        await sendMessage(chatId, '❌ Hesaplama hatası: ' + err.message);
+      }
+      return;
+    }
+    
     if (text.toLowerCase().includes('tamam') || text.toLowerCase().includes('tahmini')) {
       saveMealToDB(state.foodData);
       userStates[chatId] = null;
@@ -231,6 +248,76 @@ app.post('/telegram', async (req, res) => {
   }
 
   // Fotoğraf
+  // Barkod fotoğrafı kontrolü
+  if (photo) {
+    const caption = update.message.caption || '';
+    if (caption.toLowerCase().includes('barkod') || caption.toLowerCase().includes('barcode')) {
+      await sendMessage(chatId, '📷 Barkod okunuyor...');
+      try {
+        const fileId = photo[photo.length-1].file_id;
+        const fileInfo = await telegramRequest('getFile', { file_id: fileId });
+        const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.result.file_path}`;
+        const imgResponse = await fetch(fileUrl);
+        const imageBase64 = Buffer.from(await imgResponse.arrayBuffer()).toString('base64');
+
+        // Gemini ile barkod numarasını oku
+        const barcodePrompt = `This is a barcode image. Read the barcode number and return ONLY the number, nothing else. If you cannot read it, return "NOT_FOUND".`;
+        const barcodeNum = await geminiImage(imageBase64, 'image/jpeg', barcodePrompt);
+        const cleanBarcode = barcodeNum.trim().replace(/[^0-9]/g, '');
+
+        if (!cleanBarcode || cleanBarcode.length < 8) {
+          await sendMessage(chatId, '❌ Barkod okunamadı. Daha net bir fotoğraf çek.');
+          return;
+        }
+
+        await sendMessage(chatId, `🔍 Barkod: ${cleanBarcode}\nÜrün aranıyor...`);
+
+        // Open Food Facts'ten ürün bilgisini al
+        const offResponse = await fetch(`https://world.openfoodfacts.org/api/v0/product/${cleanBarcode}.json`);
+        const offData = await offResponse.json();
+
+        let result;
+        if (offData.status === 1 && offData.product) {
+          const p = offData.product;
+          const nutriments = p.nutriments || {};
+          result = {
+            name: p.product_name || p.product_name_tr || 'Bilinmeyen ürün',
+            description: p.brands || '',
+            portion: `100g (${p.quantity || 'belirtilmemiş'})`,
+            calories: Math.round(nutriments['energy-kcal_100g'] || nutriments['energy-kcal'] || 0),
+            protein: parseFloat(nutriments['proteins_100g'] || 0),
+            carbs: parseFloat(nutriments['carbohydrates_100g'] || 0),
+            fat: parseFloat(nutriments['fat_100g'] || 0),
+            fiber: parseFloat(nutriments['fiber_100g'] || 0),
+            sugar: parseFloat(nutriments['sugars_100g'] || 0),
+            sodium: parseFloat((nutriments['sodium_100g'] || 0) * 1000),
+            potassium: parseFloat(nutriments['potassium_100g'] || 0),
+            calcium: parseFloat(nutriments['calcium_100g'] || 0),
+            iron: parseFloat(nutriments['iron_100g'] || 0),
+            vitamin_c: parseFloat(nutriments['vitamin-c_100g'] || 0),
+            vitamin_a: parseFloat(nutriments['vitamin-a_100g'] || 0),
+            source: 'Open Food Facts'
+          };
+        } else {
+          // Open Food Facts'te bulunamadı, Gemini ile tahmin et
+          await sendMessage(chatId, '⚠️ Veritabanında bulunamadı, AI ile tahmin ediliyor...');
+          const imagePrompt = `Analyze this product barcode/packaging image. Return ONLY this JSON: {"name":"product name in Turkish","description":"brand","portion":"100g","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sugar":0,"sodium":0,"potassium":0,"calcium":0,"iron":0,"vitamin_c":0,"vitamin_a":0,"source":"AI tahmini"}`;
+          const clean = await geminiImage(imageBase64, 'image/jpeg', imagePrompt);
+          result = JSON.parse(clean);
+        }
+
+        userStates[chatId] = { step: 'waiting_portion', foodData: result };
+        await sendMessage(chatId,
+          `✅ Ürün bulundu!\n\n📦 ${result.name}\n${result.description ? '🏷️ ' + result.description + '\n' : ''}\n100g için:\n🔥 ${result.calories} kcal\n💪 Protein: ${result.protein}g\n🍞 Karb: ${result.carbs}g\n🧈 Yağ: ${result.fat}g\n\nKaç gram yedin?`,
+          [['100g kaydet'], ['150g kaydet'], ['200g kaydet'], ['❌ İptal']]
+        );
+      } catch(err) {
+        await sendMessage(chatId, '❌ Barkod okunamadı: ' + err.message);
+      }
+      return;
+    }
+  }
+  
   if (photo) {
     await sendMessage(chatId, '📸 Analiz ediliyor...');
     try {
