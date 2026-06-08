@@ -37,7 +37,7 @@ db.run(`
 `);
 
 const userStates = {};
-const GEMINI_MODEL = 'gemini-1.5-flash-latest';
+const GEMINI_MODEL = 'gemini-2.0-flash';
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
