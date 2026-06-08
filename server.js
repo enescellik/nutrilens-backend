@@ -275,7 +275,97 @@ async function setWebhook() {
   const result = await telegramRequest('setWebhook', { url: `https://${domain}/telegram` });
   console.log('Webhook:', result);
 }
+app.get('/suggestions', async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+    
+    // Bugünkü öğünleri al
+    db.all('SELECT * FROM meals WHERE date = ?', [date], async (err, todayMeals) => {
+      if (err) return res.status(500).json({ error: err.message });
 
+      // Son 7 günün öğünlerini al
+      db.all(`SELECT * FROM meals WHERE date >= date(?, '-7 days') ORDER BY date ASC`, [date], async (err2, weekMeals) => {
+        if (err2) return res.status(500).json({ error: err2.message });
+
+        const todayTotals = todayMeals.reduce((a, m) => ({
+          kcal: a.kcal + (m.calories || 0),
+          protein: a.protein + (m.protein || 0),
+          carbs: a.carbs + (m.carbs || 0),
+          fat: a.fat + (m.fat || 0),
+          fiber: a.fiber + (m.fiber || 0),
+          iron: a.iron + (m.iron || 0),
+          calcium: a.calcium + (m.calcium || 0),
+          vitamin_c: a.vitamin_c + (m.vitamin_c || 0),
+          vitamin_a: a.vitamin_a + (m.vitamin_a || 0)
+        }), { kcal:0, protein:0, carbs:0, fat:0, fiber:0, iron:0, calcium:0, vitamin_c:0, vitamin_a:0 });
+
+        const goals = req.query.goals ? JSON.parse(req.query.goals) : { kcal: 2000, protein: 150, carbs: 250, fat: 65 };
+
+        const prompt = `Sen bir diyetisyensin. Kullanıcının bugünkü besin değerleri ve hedefleri:
+
+BUGÜNKÜ DEĞERLER:
+- Kalori: ${Math.round(todayTotals.kcal)} / ${goals.kcal} kcal
+- Protein: ${Math.round(todayTotals.protein)} / ${goals.protein}g
+- Karbonhidrat: ${Math.round(todayTotals.carbs)} / ${goals.carbs}g
+- Yağ: ${Math.round(todayTotals.fat)} / ${goals.fat}g
+- Lif: ${Math.round(todayTotals.fiber)}g
+- Demir: ${todayTotals.iron.toFixed(1)}mg
+- Kalsiyum: ${Math.round(todayTotals.calcium)}mg
+- C Vitamini: ${Math.round(todayTotals.vitamin_c)}mg
+- A Vitamini: ${Math.round(todayTotals.vitamin_a)}mcg
+
+SON 7 GÜN TREND:
+${weekMeals.length > 0 ? `Toplam ${weekMeals.length} öğün kaydedildi. Ortalama günlük kalori: ${Math.round(weekMeals.reduce((a,m) => a + (m.calories||0), 0) / 7)} kcal` : 'Veri yok'}
+
+Eksik besinleri kapatacak 3 yemek önerisi yap. Her öneri için bu JSON formatını kullan:
+[
+  {
+    "food": "Yemek adı",
+    "reason": "Neden öneriyorum (eksik besine göre, maks 60 karakter)",
+    "nutrients": "Hangi besinleri karşılar",
+    "calories": 250,
+    "weekly_tip": "Haftalık trend yorumu (sadece ilk öneride, diğerlerinde boş bırak)"
+  }
+]
+
+Sadece JSON döndür, başka hiçbir şey yazma.`;
+
+        try {
+          const clean = await geminiText(prompt);
+          const suggestions = JSON.parse(clean);
+          res.json({ suggestions, todayTotals, goals });
+        } catch (e) {
+          res.status(500).json({ error: e.message });
+        }
+      });
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/recipe', async (req, res) => {
+  try {
+    const food = req.query.food;
+    if (!food) return res.status(400).json({ error: 'Yemek adı gerekli' });
+
+    const prompt = `"${food}" yemeğinin tarifini ver. Sadece bu JSON formatında döndür:
+{
+  "name": "Yemek adı",
+  "servings": "Kaç kişilik",
+  "time": "Hazırlık süresi",
+  "ingredients": ["malzeme 1", "malzeme 2"],
+  "steps": ["adım 1", "adım 2", "adım 3"],
+  "tip": "Püf nokta"
+}`;
+
+    const clean = await geminiText(prompt);
+    const recipe = JSON.parse(clean);
+    res.json(recipe);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`NutriLens backend çalışıyor: port ${PORT}`);
