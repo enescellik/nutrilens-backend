@@ -36,6 +36,9 @@ db.run(`
   )
 `);
 
+// Kullanıcı sohbet hafızası
+const userStates = {};
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -100,6 +103,35 @@ async function analyzeWithGemini(imageBase64, mediaType) {
   return JSON.parse(clean);
 }
 
+async function recalculateWithPortion(foodData, portionText) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const prompt = `Bu yemek için besin değerlerini yeniden hesapla:
+Yemek: ${foodData.name}
+Kullanıcının belirttiği miktar: ${portionText}
+Önceki hesaplama (referans porsiyon: ${foodData.portion}): ${foodData.calories} kcal, protein: ${foodData.protein}g, karb: ${foodData.carbs}g, yağ: ${foodData.fat}g
+
+Kullanıcının belirttiği miktara göre tüm değerleri yeniden hesapla. Reply ONLY with this JSON, no markdown:
+{"name":"${foodData.name}","description":"${foodData.description}","portion":"${portionText}","calories":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sugar":0,"sodium":0,"potassium":0,"calcium":0,"iron":0,"vitamin_c":0,"vitamin_a":0,"source":"${foodData.source}"}`;
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+      })
+    }
+  );
+
+  const data = await response.json();
+  if (!data.candidates || data.candidates.length === 0) throw new Error('Gemini yanıt vermedi');
+  const text = data.candidates[0].content.parts[0].text;
+  const clean = text.replace(/```json/g, '').replace(/```/g, '').trim();
+  return JSON.parse(clean);
+}
+
 app.post('/analyze', upload.single('image'), async (req, res) => {
   try {
     const imageBase64 = req.file.buffer.toString('base64');
@@ -114,9 +146,6 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
 
 // Telegram bot
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const BACKEND_URL = process.env.RAILWAY_PUBLIC_DOMAIN 
-  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-  : 'http://localhost:3000';
 
 async function telegramRequest(method, body) {
   const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/${method}`, {
@@ -127,8 +156,19 @@ async function telegramRequest(method, body) {
   return r.json();
 }
 
-async function sendMessage(chatId, text) {
-  return telegramRequest('sendMessage', { chat_id: chatId, text });
+async function sendMessage(chatId, text, keyboard) {
+  const body = { chat_id: chatId, text };
+  if (keyboard) body.reply_markup = keyboard;
+  return telegramRequest('sendMessage', body);
+}
+
+function saveMealToDB(result) {
+  const date = new Date().toISOString().split('T')[0];
+  db.run(
+    `INSERT INTO meals (date, name, description, portion, calories, protein, carbs, fat, fiber, sugar, sodium, potassium, calcium, iron, vitamin_c, vitamin_a, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [date, result.name, result.description, result.portion, result.calories, result.protein, result.carbs, result.fat, result.fiber, result.sugar, result.sodium, result.potassium, result.calcium, result.iron, result.vitamin_c, result.vitamin_a, result.source]
+  );
 }
 
 app.post('/telegram', async (req, res) => {
@@ -139,9 +179,17 @@ app.post('/telegram', async (req, res) => {
   const chatId = update.message.chat.id;
   const text = update.message.text;
   const photo = update.message.photo;
+  const state = userStates[chatId];
 
   if (text === '/start') {
-    await sendMessage(chatId, '🥗 NutriLens\'e hoş geldin! Yemek fotoğrafı gönder, besin değerlerini analiz edeyim ve kayıt altına alayım.');
+    userStates[chatId] = null;
+    await sendMessage(chatId, '🥗 NutriLens\'e hoş geldin!\n\nYemek fotoğrafı gönder, besin değerlerini analiz edeyim.\n\nKomutlar:\n/bugun - günlük özet\n/iptal - işlemi iptal et');
+    return;
+  }
+
+  if (text === '/iptal') {
+    userStates[chatId] = null;
+    await sendMessage(chatId, '❌ İptal edildi. Yeni fotoğraf gönderebilirsin.');
     return;
   }
 
@@ -170,6 +218,35 @@ app.post('/telegram', async (req, res) => {
     return;
   }
 
+  // Kullanıcı miktar cevabı bekleniyor
+  if (state && state.step === 'waiting_portion' && text) {
+    await sendMessage(chatId, '⏳ Hesaplanıyor...');
+    try {
+      const result = await recalculateWithPortion(state.foodData, text);
+      userStates[chatId] = null;
+      saveMealToDB(result);
+
+      let msg = `✅ ${result.name} kaydedildi! (${text})\n\n`;
+      msg += `🔥 ${Math.round(result.calories || 0)} kcal\n`;
+      msg += `💪 Protein: ${Math.round(result.protein || 0)}g\n`;
+      msg += `🍞 Karb: ${Math.round(result.carbs || 0)}g\n`;
+      msg += `🧈 Yağ: ${Math.round(result.fat || 0)}g\n`;
+      msg += `📌 Kaynak: ${result.source || '-'}`;
+      await sendMessage(chatId, msg);
+    } catch (err) {
+      await sendMessage(chatId, '❌ Hesaplama hatası: ' + err.message);
+    }
+    return;
+  }
+
+  // Kullanıcı "olduğu gibi kaydet" seçti
+  if (state && state.step === 'waiting_portion' && !text && update.message.text === 'Olduğu gibi kaydet') {
+    saveMealToDB(state.foodData);
+    userStates[chatId] = null;
+    await sendMessage(chatId, `✅ ${state.foodData.name} kaydedildi!`);
+    return;
+  }
+
   if (photo) {
     await sendMessage(chatId, '📸 Fotoğraf alındı, analiz ediliyor...');
     try {
@@ -184,23 +261,39 @@ app.post('/telegram', async (req, res) => {
 
       const result = await analyzeWithGemini(imageBase64, 'image/jpeg');
 
-      const date = new Date().toISOString().split('T')[0];
-      db.run(
-        `INSERT INTO meals (date, name, description, portion, calories, protein, carbs, fat, fiber, sugar, sodium, potassium, calcium, iron, vitamin_c, vitamin_a, source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [date, result.name, result.description, result.portion, result.calories, result.protein, result.carbs, result.fat, result.fiber, result.sugar, result.sodium, result.potassium, result.calcium, result.iron, result.vitamin_c, result.vitamin_a, result.source]
-      );
+      // Kullanıcıya sor
+      userStates[chatId] = { step: 'waiting_portion', foodData: result };
 
-      let msg = `✅ ${result.name} kaydedildi!\n\n`;
-      msg += `🔥 ${Math.round(result.calories || 0)} kcal\n`;
-      msg += `💪 Protein: ${Math.round(result.protein || 0)}g\n`;
-      msg += `🍞 Karb: ${Math.round(result.carbs || 0)}g\n`;
-      msg += `🧈 Yağ: ${Math.round(result.fat || 0)}g\n`;
-      msg += `📌 Kaynak: ${result.source || '-'}`;
-      await sendMessage(chatId, msg);
+      let msg = `🍽️ *${result.name}* tespit ettim!\n\n`;
+      msg += `Tahmini porsiyon: ${result.portion}\n`;
+      msg += `Tahmini kalori: ~${Math.round(result.calories || 0)} kcal\n\n`;
+      msg += `Kaç gram yedin veya kaç adet? (örn: "2 adet", "150 gram", "1 porsiyon")\n`;
+      msg += `Bilmiyorsan "tamam" yaz, tahmini değerle kaydederim.`;
+
+      await sendMessage(chatId, msg, {
+        keyboard: [['Tamam, tahmini kaydet'], ['❌ İptal']],
+        resize_keyboard: true,
+        one_time_keyboard: true
+      });
+
     } catch (err) {
+      userStates[chatId] = null;
       await sendMessage(chatId, '❌ Analiz başarısız: ' + err.message);
     }
+    return;
+  }
+
+  // "Tamam" veya "tahmini kaydet" yazarsa
+  if (state && state.step === 'waiting_portion' && text && (text.toLowerCase().includes('tamam') || text.toLowerCase().includes('tahmini'))) {
+    saveMealToDB(state.foodData);
+    userStates[chatId] = null;
+
+    let msg = `✅ ${state.foodData.name} kaydedildi!\n\n`;
+    msg += `🔥 ${Math.round(state.foodData.calories || 0)} kcal\n`;
+    msg += `💪 Protein: ${Math.round(state.foodData.protein || 0)}g\n`;
+    msg += `🍞 Karb: ${Math.round(state.foodData.carbs || 0)}g\n`;
+    msg += `🧈 Yağ: ${Math.round(state.foodData.fat || 0)}g`;
+    await sendMessage(chatId, msg);
     return;
   }
 
