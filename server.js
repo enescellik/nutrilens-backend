@@ -401,6 +401,69 @@ async function setWebhook() {
 }
 
 const PORT = process.env.PORT || 3000;
+// Admin middleware
+function adminMiddleware(req, res, next) {
+  const adminPassword = req.headers['x-admin-password'];
+  if (adminPassword !== (process.env.ADMIN_PASSWORD || 'nutrilens-admin-2026')) {
+    return res.status(401).json({ error: 'Yetkisiz erişim' });
+  }
+  next();
+}
+
+// Admin - tüm kullanıcılar
+app.get('/admin/users', adminMiddleware, (req, res) => {
+  db.all(`
+    SELECT u.id, u.first_name, u.last_name, u.email, u.gender, u.age, u.height, u.weight, u.goal, u.created_at,
+    COUNT(m.id) as meal_count,
+    COALESCE(SUM(m.calories), 0) as total_calories
+    FROM users u
+    LEFT JOIN meals m ON u.id = m.user_id
+    GROUP BY u.id
+    ORDER BY u.created_at DESC
+  `, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+// Admin - kullanıcı detayı
+app.get('/admin/users/:id', adminMiddleware, (req, res) => {
+  db.get('SELECT * FROM users WHERE id=?', [req.params.id], (err, user) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!user) return res.status(404).json({ error: 'Kullanıcı bulunamadı' });
+    db.all('SELECT * FROM meals WHERE user_id=? ORDER BY created_at DESC LIMIT 20', [req.params.id], (err2, meals) => {
+      if (err2) return res.status(500).json({ error: err2.message });
+      res.json({ user, meals });
+    });
+  });
+});
+
+// Admin - kullanıcı sil
+app.delete('/admin/users/:id', adminMiddleware, (req, res) => {
+  db.run('DELETE FROM meals WHERE user_id=?', [req.params.id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    db.run('DELETE FROM users WHERE id=?', [req.params.id], (err2) => {
+      if (err2) return res.status(500).json({ error: err2.message });
+      res.json({ success: true });
+    });
+  });
+});
+
+// Admin - genel istatistikler
+app.get('/admin/stats', adminMiddleware, (req, res) => {
+  db.get('SELECT COUNT(*) as total_users FROM users', (err, users) => {
+    db.get('SELECT COUNT(*) as total_meals, COALESCE(SUM(calories),0) as total_calories FROM meals', (err2, meals) => {
+      db.get('SELECT COUNT(*) as today_meals FROM meals WHERE date=?', [new Date().toISOString().split('T')[0]], (err3, today) => {
+        res.json({
+          total_users: users?.total_users || 0,
+          total_meals: meals?.total_meals || 0,
+          total_calories: Math.round(meals?.total_calories || 0),
+          today_meals: today?.today_meals || 0
+        });
+      });
+    });
+  });
+});
 app.listen(PORT, async () => {
   console.log(`NutriLens backend çalışıyor: port ${PORT}`);
   await setWebhook();
