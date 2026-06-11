@@ -25,6 +25,8 @@ db.serialize(() => {
     age INTEGER,
     height REAL,
     weight REAL,
+    target_weight REAL,
+    weekly_loss REAL DEFAULT 0.5,
     activity TEXT,
     goal TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -114,10 +116,10 @@ app.post('/auth/login', async (req, res) => {
 
 // Profil güncelle
 app.put('/auth/profile', authMiddleware, (req, res) => {
-  const { gender, age, height, weight, activity, goal } = req.body;
+  const { gender, age, height, weight, target_weight, weekly_loss, activity, goal } = req.body;
   db.run(
-    'UPDATE users SET gender=?, age=?, height=?, weight=?, activity=?, goal=? WHERE id=?',
-    [gender, age, height, weight, activity, goal, req.userId],
+    'UPDATE users SET gender=?, age=?, height=?, weight=?, target_weight=?, weekly_loss=?, activity=?, goal=? WHERE id=?',
+    [gender, age, height, weight, target_weight || null, weekly_loss || 0.5, activity, goal, req.userId],
     function(err) {
       if (err) return res.status(500).json({ error: err.message });
       db.get('SELECT * FROM users WHERE id=?', [req.userId], (err, user) => {
